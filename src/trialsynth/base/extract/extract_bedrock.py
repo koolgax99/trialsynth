@@ -1,18 +1,21 @@
-"""Run Bedrock extraction in batch or synchronous mode."""
+"""Run extraction on Bedrock (batch or sync) or an OpenAI-compatible server."""
 import os
 import re
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse
 
 import boto3
 import click
+import requests
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 
 DEFAULT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_MAX_JOBS = 10
 TERMINAL_JOB_STATUSES = ("Completed", "Failed", "Stopped", "PartiallyCompleted")
 INPUT_FILE_RE = re.compile(r"_input_(\d+)\.jsonl$", re.IGNORECASE)
@@ -440,8 +443,144 @@ def extract_trial_data_bedrock_sync(
     return results
 
 
+def _read_jsonl_lines(path: str) -> list[str]:
+    """Return the non-empty lines of a JSONL file given as an S3 URI or local path."""
+    if _is_s3_uri(path):
+        bucket, key = _parse_s3_uri(path)
+        body = boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"]
+        text = body.read().decode("utf-8")
+    else:
+        text = Path(path).expanduser().read_text(encoding="utf-8")
+    return [line for line in text.splitlines() if line.strip()]
+
+
+def to_openai_request(model_input: dict, model: str) -> dict:
+    """Translate a Bedrock Anthropic ``modelInput`` into an OpenAI chat request.
+
+    The Anthropic ``output_config`` JSON schema becomes an OpenAI
+    ``response_format``, which vLLM enforces with guided decoding, so the
+    reply parses exactly as a Bedrock structured-output reply does.
+    """
+    messages = []
+    if model_input.get("system"):
+        messages.append({"role": "system", "content": model_input["system"]})
+    messages.extend(model_input["messages"])
+
+    request = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": model_input["max_tokens"],
+    }
+    for key in ("temperature", "top_p"):
+        if key in model_input:
+            request[key] = model_input[key]
+    fmt = (model_input.get("output_config") or {}).get("format")
+    if fmt and fmt.get("type") == "json_schema":
+        request["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "extraction",
+                "schema": fmt["schema"],
+                "strict": True,
+            },
+        }
+    return request
+
+
+def to_bedrock_output(response: dict) -> dict:
+    """Wrap an OpenAI chat completion in the Anthropic shape Bedrock returns.
+
+    ``process`` reads ``content[0].text``; matching the shape keeps it
+    backend-agnostic.
+    """
+    choice = response["choices"][0]
+    usage = response.get("usage") or {}
+    return {
+        "content": [{"type": "text", "text": choice["message"]["content"]}],
+        "stop_reason": (
+            "max_tokens" if choice.get("finish_reason") == "length" else "end_turn"
+        ),
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens"),
+            "output_tokens": usage.get("completion_tokens"),
+        },
+    }
+
+
+def extract_trial_data_openai(
+    input_jsonl_path: str,
+    output_jsonl_path: str,
+    base_url: str = DEFAULT_OPENAI_BASE_URL,
+    model: str | None = None,
+    max_workers: int = 8,
+) -> list[dict]:
+    """Run Bedrock input records against an OpenAI-compatible server (e.g. vLLM).
+
+    Parameters
+    ----------
+    input_jsonl_path :
+        S3 URI or local path of a ``*_input_{N}.jsonl`` file from ``prepare``.
+    output_jsonl_path :
+        Local path to write output JSONL records.
+    base_url :
+        Server base URL, including the ``/v1`` suffix.
+    model :
+        Served model name. Defaults to the first model the server lists.
+    max_workers :
+        Concurrent requests. vLLM batches them on the GPU.
+
+    Returns
+    -------
+    :
+        List of ``{"recordId", "modelInput", "modelOutput"}`` result dicts,
+        matching the record shape Bedrock batch writes.
+    """
+    base_url = base_url.rstrip("/")
+    session = requests.Session()
+    # Cluster http_proxy settings would otherwise intercept local calls.
+    session.trust_env = False
+    if model is None:
+        resp = session.get(f"{base_url}/models", timeout=30)
+        resp.raise_for_status()
+        model = resp.json()["data"][0]["id"]
+    click.echo(f"Using model {model} at {base_url}")
+
+    records = [json.loads(line) for line in _read_jsonl_lines(input_jsonl_path)]
+
+    def invoke(record: dict) -> dict:
+        resp = session.post(
+            f"{base_url}/chat/completions",
+            json=to_openai_request(record["modelInput"], model),
+            timeout=1800,
+        )
+        if not resp.ok:
+            raise click.ClickException(
+                f"{record['recordId']}: HTTP {resp.status_code} {resp.text}"
+            )
+        return {
+            "recordId": record["recordId"],
+            "modelInput": record["modelInput"],
+            "modelOutput": to_bedrock_output(resp.json()),
+        }
+
+    output_path = Path(output_jsonl_path).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    results = []
+    with open(output_path, "w", encoding="utf-8") as out_f, \
+            ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for result in tqdm(
+            pool.map(invoke, records), total=len(records), desc="Invoking model"
+        ):
+            results.append(result)
+            out_f.write(json.dumps(result) + "\n")
+            out_f.flush()
+    return results
+
+
 @click.command()
-@click.argument("mode", type=click.Choice(["batch", "sync"], case_sensitive=False))
+@click.argument(
+    "mode", type=click.Choice(["batch", "sync", "openai"], case_sensitive=False)
+)
 @click.argument("s3_input_jsonl_path")
 @click.argument("output_jsonl_path")
 @click.option(
@@ -463,9 +602,25 @@ def extract_trial_data_bedrock_sync(
 @click.option(
     "--model",
     "model_id",
-    default=DEFAULT_MODEL,
+    default=None,
+    help=(
+        f"Model ID. Bedrock modes default to {DEFAULT_MODEL}; openai mode "
+        "defaults to the first model the server lists."
+    ),
+)
+@click.option(
+    "--base-url",
+    envvar="OPENAI_BASE_URL",
+    default=DEFAULT_OPENAI_BASE_URL,
     show_default=True,
-    help="Bedrock model ID.",
+    help="openai mode: server base URL including /v1. Reads OPENAI_BASE_URL.",
+)
+@click.option(
+    "--max-workers",
+    type=int,
+    default=8,
+    show_default=True,
+    help="openai mode: concurrent requests to the server.",
 )
 @click.option(
     "--poll-interval",
@@ -499,14 +654,16 @@ def main(
     output_jsonl_path: str,
     job_name: str | None,
     role_arn: str | None,
-    model_id: str,
+    model_id: str | None,
+    base_url: str,
+    max_workers: int,
     poll_interval: int,
     wait: bool | None,
     max_jobs: int,
 ) -> None:
-    """Extract trial data with Amazon Bedrock.
+    """Extract trial data with Amazon Bedrock or an OpenAI-compatible server.
 
-    MODE is either ``batch`` or ``sync``. For ``batch`` there are two modes:
+    MODE is ``batch``, ``sync`` or ``openai``. For ``batch`` there are two modes:
     1. A single JSONL input file (``*_input_{N}.jsonl``) is processed in one
     Bedrock batch job.
     2. A prefix containing multiple ``*_input_{N}.jsonl`` files is processed in
@@ -516,9 +673,24 @@ def main(
     object or a prefix of ``*_input_{N}.jsonl`` files. OUTPUT_JSONL_PATH
     must be an S3 URI when MODE is batch (output S3 prefix for multiple jobs, or
     the output URI for a single file); for sync it is a local file path.
+
+    ``openai`` sends each record to an OpenAI-compatible server such as vLLM
+    (``--base-url``) and writes Bedrock-shaped output, so ``process`` reads it
+    unchanged. Its input may be an S3 URI or a local path; output is local.
     """
-    _require_s3_uri(s3_input_jsonl_path, "input JSONL path")
     mode = mode.lower()
+    if mode == "openai":
+        extract_trial_data_openai(
+            input_jsonl_path=s3_input_jsonl_path,
+            output_jsonl_path=output_jsonl_path,
+            base_url=base_url,
+            model=model_id,
+            max_workers=max_workers,
+        )
+        return
+
+    _require_s3_uri(s3_input_jsonl_path, "input JSONL path")
+    model_id = model_id or DEFAULT_MODEL
 
     if mode == "batch":
         _require_s3_uri(output_jsonl_path, "output JSONL path")

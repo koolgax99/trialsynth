@@ -113,8 +113,17 @@ class Intervention(BaseModel):
     description: str = Field(default=None)
 
 
+class ArmGroup(BaseModel):
+
+    label: str = Field(default=None)
+    arm_group_type: str = Field(alias="type", default=None)
+    description: str = Field(default=None)
+    intervention_names: list[str] = Field(alias="interventionNames", default=[])
+
+
 class ArmsInterventionsModule(BaseModel):
 
+    arm_groups: list[ArmGroup] = Field(alias="armGroups", default=[])
     arms_interventions: list[Intervention] = Field(alias="interventions", default=[])
 
 
@@ -217,6 +226,218 @@ class ProtocolSection(BaseModel):
     )
 
 
+class ResultGroup(BaseModel):
+    # Referred to by ID from every measurement in the same module
+    id: str = Field(default=None)
+    title: str = Field(default=None)
+    description: str = Field(default=None)
+
+
+class GroupCount(BaseModel):
+    group_id: str = Field(alias="groupId", default=None)
+    value: str = Field(default=None)
+
+
+class Denominator(BaseModel):
+    units: str = Field(default=None)
+    counts: list[GroupCount] = Field(default=[])
+
+
+class FlowCount(BaseModel):
+    group_id: str = Field(alias="groupId", default=None)
+    num_subjects: str = Field(alias="numSubjects", default=None)
+    num_units: str = Field(alias="numUnits", default=None)
+    comment: str = Field(default=None)
+
+
+class FlowMilestone(BaseModel):
+    type: str = Field(default=None)
+    comment: str = Field(default=None)
+    achievements: list[FlowCount] = Field(default=[])
+
+
+class FlowDropWithdraw(BaseModel):
+    type: str = Field(default=None)
+    comment: str = Field(default=None)
+    reasons: list[FlowCount] = Field(default=[])
+
+
+class FlowPeriod(BaseModel):
+    title: str = Field(default=None)
+    milestones: list[FlowMilestone] = Field(default=[])
+    drop_withdraws: list[FlowDropWithdraw] = Field(alias="dropWithdraws", default=[])
+
+
+class ParticipantFlowModule(BaseModel):
+    # See: https://clinicaltrials.gov/policy/results-definitions#Result_ParticipantFlow
+
+    recruitment_details: str = Field(alias="recruitmentDetails", default=None)
+    pre_assignment_details: str = Field(alias="preAssignmentDetails", default=None)
+    type_units_analyzed: str = Field(alias="typeUnitsAnalyzed", default=None)
+    groups: list[ResultGroup] = Field(default=[])
+    periods: list[FlowPeriod] = Field(default=[])
+
+
+class Measurement(BaseModel):
+    group_id: str = Field(alias="groupId", default=None)
+    value: str = Field(default=None)
+    spread: str = Field(default=None)
+    lower_limit: str = Field(alias="lowerLimit", default=None)
+    upper_limit: str = Field(alias="upperLimit", default=None)
+    comment: str = Field(default=None)
+
+
+class MeasureCategory(BaseModel):
+    title: str = Field(default=None)
+    measurements: list[Measurement] = Field(default=[])
+
+
+class MeasureClass(BaseModel):
+    title: str = Field(default=None)
+    denoms: list[Denominator] = Field(default=[])
+    categories: list[MeasureCategory] = Field(default=[])
+
+
+class Measure(BaseModel):
+    title: str = Field(default=None)
+    description: str = Field(default=None)
+    population_description: str = Field(alias="populationDescription", default=None)
+    param_type: str = Field(alias="paramType", default=None)
+    dispersion_type: str = Field(alias="dispersionType", default=None)
+    unit_of_measure: str = Field(alias="unitOfMeasure", default=None)
+    calculate_pct: bool = Field(alias="calculatePct", default=None)
+    denom_units_selected: str = Field(alias="denomUnitsSelected", default=None)
+    denoms: list[Denominator] = Field(default=[])
+    classes: list[MeasureClass] = Field(default=[])
+
+
+class BaselineCharacteristicsModule(BaseModel):
+    # See: https://clinicaltrials.gov/policy/results-definitions#Result_Baseline
+
+    population_description: str = Field(alias="populationDescription", default=None)
+    type_units_analyzed: str = Field(alias="typeUnitsAnalyzed", default=None)
+    groups: list[ResultGroup] = Field(default=[])
+    denoms: list[Denominator] = Field(default=[])
+    measures: list[Measure] = Field(default=[])
+
+
+class OutcomeAnalysis(BaseModel):
+    group_ids: list[str] = Field(alias="groupIds", default=[])
+    group_description: str = Field(alias="groupDescription", default=None)
+    tested_non_inferiority: bool = Field(alias="testedNonInferiority", default=None)
+    non_inferiority_type: str = Field(alias="nonInferiorityType", default=None)
+    non_inferiority_comment: str = Field(alias="nonInferiorityComment", default=None)
+    p_value: str = Field(alias="pValue", default=None)
+    p_value_comment: str = Field(alias="pValueComment", default=None)
+    statistical_method: str = Field(alias="statisticalMethod", default=None)
+    statistical_comment: str = Field(alias="statisticalComment", default=None)
+    param_type: str = Field(alias="paramType", default=None)
+    param_value: str = Field(alias="paramValue", default=None)
+    dispersion_type: str = Field(alias="dispersionType", default=None)
+    dispersion_value: str = Field(alias="dispersionValue", default=None)
+    ci_pct_value: str = Field(alias="ciPctValue", default=None)
+    ci_num_sides: str = Field(alias="ciNumSides", default=None)
+    ci_lower_limit: str = Field(alias="ciLowerLimit", default=None)
+    ci_lower_limit_comment: str = Field(alias="ciLowerLimitComment", default=None)
+    ci_upper_limit: str = Field(alias="ciUpperLimit", default=None)
+    ci_upper_limit_comment: str = Field(alias="ciUpperLimitComment", default=None)
+    estimate_comment: str = Field(alias="estimateComment", default=None)
+    other_analysis_description: str = Field(
+        alias="otherAnalysisDescription", default=None
+    )
+
+
+class OutcomeMeasure(BaseModel):
+    type: str = Field(default=None)
+    title: str = Field(default=None)
+    description: str = Field(default=None)
+    population_description: str = Field(alias="populationDescription", default=None)
+    reporting_status: str = Field(alias="reportingStatus", default=None)
+    anticipated_posting_date: str = Field(
+        alias="anticipatedPostingDate", default=None
+    )
+    param_type: str = Field(alias="paramType", default=None)
+    dispersion_type: str = Field(alias="dispersionType", default=None)
+    unit_of_measure: str = Field(alias="unitOfMeasure", default=None)
+    time_frame: str = Field(alias="timeFrame", default=None)
+    type_units_analyzed: str = Field(alias="typeUnitsAnalyzed", default=None)
+    denom_units_selected: str = Field(alias="denomUnitsSelected", default=None)
+    calculate_pct: bool = Field(alias="calculatePct", default=None)
+    groups: list[ResultGroup] = Field(default=[])
+    denoms: list[Denominator] = Field(default=[])
+    classes: list[MeasureClass] = Field(default=[])
+    analyses: list[OutcomeAnalysis] = Field(default=[])
+
+
+class OutcomeMeasuresModule(BaseModel):
+    # See: https://clinicaltrials.gov/policy/results-definitions#Result_Outcome_Measure
+
+    outcome_measures: list[OutcomeMeasure] = Field(
+        alias="outcomeMeasures", default=[]
+    )
+
+
+class EventStat(BaseModel):
+    group_id: str = Field(alias="groupId", default=None)
+    num_affected: int = Field(alias="numAffected", default=None)
+    num_at_risk: int = Field(alias="numAtRisk", default=None)
+    num_events: int = Field(alias="numEvents", default=None)
+
+
+class AdverseEvent(BaseModel):
+    term: str = Field(default=None)
+    organ_system: str = Field(alias="organSystem", default=None)
+    source_vocabulary: str = Field(alias="sourceVocabulary", default=None)
+    assessment_type: str = Field(alias="assessmentType", default=None)
+    notes: str = Field(default=None)
+    stats: list[EventStat] = Field(default=[])
+
+
+class AdverseEventGroup(BaseModel):
+    id: str = Field(default=None)
+    title: str = Field(default=None)
+    description: str = Field(default=None)
+    serious_num_affected: int = Field(alias="seriousNumAffected", default=None)
+    serious_num_at_risk: int = Field(alias="seriousNumAtRisk", default=None)
+    other_num_affected: int = Field(alias="otherNumAffected", default=None)
+    other_num_at_risk: int = Field(alias="otherNumAtRisk", default=None)
+    deaths_num_affected: int = Field(alias="deathsNumAffected", default=None)
+    deaths_num_at_risk: int = Field(alias="deathsNumAtRisk", default=None)
+
+
+class AdverseEventsModule(BaseModel):
+    # See: https://clinicaltrials.gov/policy/results-definitions#Result_AdverseEvents
+
+    frequency_threshold: str = Field(alias="frequencyThreshold", default=None)
+    time_frame: str = Field(alias="timeFrame", default=None)
+    description: str = Field(default=None)
+    all_cause_mortality_comment: str = Field(
+        alias="allCauseMortalityComment", default=None
+    )
+    event_groups: list[AdverseEventGroup] = Field(alias="eventGroups", default=[])
+    serious_events: list[AdverseEvent] = Field(alias="seriousEvents", default=[])
+    other_events: list[AdverseEvent] = Field(alias="otherEvents", default=[])
+
+
+class ResultsSection(BaseModel):
+    # moreInfoModule is not requested: it carries agreements and a point of
+    # contact, not trial data.
+
+    participant_flow_module: ParticipantFlowModule = Field(
+        alias="participantFlowModule", default=ParticipantFlowModule()
+    )
+    baseline_characteristics_module: BaselineCharacteristicsModule = Field(
+        alias="baselineCharacteristicsModule",
+        default=BaselineCharacteristicsModule(),
+    )
+    outcome_measures_module: OutcomeMeasuresModule = Field(
+        alias="outcomeMeasuresModule", default=OutcomeMeasuresModule()
+    )
+    adverse_events_module: AdverseEventsModule = Field(
+        alias="adverseEventsModule", default=AdverseEventsModule()
+    )
+
+
 class DerivedSection(BaseModel):
 
     condition_browse_module: ConditionBrowseModule = Field(
@@ -234,6 +455,11 @@ class UnflattenedTrial(BaseModel):
 
     protocol_section: ProtocolSection = Field(alias="protocolSection")
     derived_section: DerivedSection = Field(alias="derivedSection")
+    results_section: ResultsSection = Field(
+        alias="resultsSection",
+        default=None,
+        description="Present only when the record carries posted results"
+    )
     has_results: bool = Field(
         alias="hasResults",
         default=None,

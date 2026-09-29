@@ -1,6 +1,7 @@
 """Gets Clinicaltrials.gov data from REST API or saved file"""
 import datetime
 from time import sleep
+from typing import Optional
 
 import requests
 from overrides import overrides
@@ -9,14 +10,35 @@ import logging
 
 from ..base.fetch import Fetcher
 from ..base.models import (
+    AdverseEvent,
+    AdverseEventGroup,
+    AdverseEvents,
+    ArmGroup,
+    BaselineCharacteristics,
     Condition,
+    Denominator,
     DesignInfo,
     Eligibility,
+    EventStat,
+    FlowCount,
+    FlowDropWithdraw,
+    FlowMilestone,
+    FlowPeriod,
+    GroupCount,
     Intervention,
     Location,
+    Measure,
+    MeasureCategory,
+    MeasureClass,
+    Measurement,
     Outcome,
+    OutcomeAnalysis,
+    OutcomeResult,
+    ParticipantFlow,
+    ResultGroup,
     SecondaryId,
     Trial,
+    TrialResults,
 )
 from .rest_api_response_models import UnflattenedTrial
 from .config import CTConfig
@@ -209,8 +231,10 @@ class CTFetcher(Fetcher):
             if enrollment_info.enrollment_type:
                 trial.enrollment_type = enrollment_info.enrollment_type.strip().lower()
 
-            # Whether the record carries a results section
+            # Whether the record carries a results section, and the section
+            # itself when it does
             trial.has_results = rest_trial.has_results
+            trial.results = _results(rest_trial.results_section)
 
             # Who the trial will and will not enrol. The criteria are a single
             # free-text blob, not separate inclusion/exclusion fields.
@@ -282,6 +306,24 @@ class CTFetcher(Fetcher):
                     for mesh in condition_meshes
                 ]
             )
+
+            # Participant groups the protocol plans, and the interventions
+            # assigned to each
+            trial.arm_groups = [
+                ArmGroup(
+                    label=arm.label,
+                    type=(
+                        arm.arm_group_type.strip().lower()
+                        if arm.arm_group_type
+                        else None
+                    ),
+                    description=arm.description,
+                    intervention_names=arm.intervention_names,
+                )
+                for arm in (
+                    rest_trial.protocol_section.arms_interventions_module.arm_groups
+                )
+            ]
 
             # Assigned intervention text
             intervention_arms = (
@@ -361,3 +403,236 @@ def _parse_date(date_str: str) -> datetime.datetime:
         return datetime.datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
         return datetime.datetime.strptime(date_str, "%Y-%m")
+
+
+# Results mapping. The domain classes mirror the registry's own table shape, so
+# these are field-for-field: the only translation is the naming ("denoms" ->
+# "denominators") and dropping moreInfoModule, which carries no trial data.
+
+
+def _result_groups(groups) -> list[ResultGroup]:
+    return [
+        ResultGroup(id=group.id, title=group.title, description=group.description)
+        for group in groups
+    ]
+
+
+def _denominators(denoms) -> list[Denominator]:
+    return [
+        Denominator(
+            units=denom.units,
+            counts=[
+                GroupCount(group_id=count.group_id, value=count.value)
+                for count in denom.counts
+            ],
+        )
+        for denom in denoms
+    ]
+
+
+def _flow_counts(counts) -> list[FlowCount]:
+    return [
+        FlowCount(
+            group_id=count.group_id,
+            num_subjects=count.num_subjects,
+            num_units=count.num_units,
+            comment=count.comment,
+        )
+        for count in counts
+    ]
+
+
+def _participant_flow(module) -> ParticipantFlow:
+    return ParticipantFlow(
+        recruitment_details=module.recruitment_details,
+        pre_assignment_details=module.pre_assignment_details,
+        type_units_analyzed=module.type_units_analyzed,
+        groups=_result_groups(module.groups),
+        periods=[
+            FlowPeriod(
+                title=period.title,
+                milestones=[
+                    FlowMilestone(
+                        type=milestone.type,
+                        comment=milestone.comment,
+                        achievements=_flow_counts(milestone.achievements),
+                    )
+                    for milestone in period.milestones
+                ],
+                drop_withdraws=[
+                    FlowDropWithdraw(
+                        type=drop.type,
+                        comment=drop.comment,
+                        reasons=_flow_counts(drop.reasons),
+                    )
+                    for drop in period.drop_withdraws
+                ],
+            )
+            for period in module.periods
+        ],
+    )
+
+
+def _measure_classes(classes) -> list[MeasureClass]:
+    return [
+        MeasureClass(
+            title=measure_class.title,
+            denominators=_denominators(measure_class.denoms),
+            categories=[
+                MeasureCategory(
+                    title=category.title,
+                    measurements=[
+                        Measurement(
+                            group_id=measurement.group_id,
+                            value=measurement.value,
+                            spread=measurement.spread,
+                            lower_limit=measurement.lower_limit,
+                            upper_limit=measurement.upper_limit,
+                            comment=measurement.comment,
+                        )
+                        for measurement in category.measurements
+                    ],
+                )
+                for category in measure_class.categories
+            ],
+        )
+        for measure_class in classes
+    ]
+
+
+def _baseline(module) -> BaselineCharacteristics:
+    return BaselineCharacteristics(
+        population_description=module.population_description,
+        type_units_analyzed=module.type_units_analyzed,
+        groups=_result_groups(module.groups),
+        denominators=_denominators(module.denoms),
+        measures=[
+            Measure(
+                title=measure.title,
+                description=measure.description,
+                population_description=measure.population_description,
+                param_type=measure.param_type,
+                dispersion_type=measure.dispersion_type,
+                unit_of_measure=measure.unit_of_measure,
+                calculate_pct=measure.calculate_pct,
+                denom_units_selected=measure.denom_units_selected,
+                denominators=_denominators(measure.denoms),
+                classes=_measure_classes(measure.classes),
+            )
+            for measure in module.measures
+        ],
+    )
+
+
+def _outcome_results(module) -> list[OutcomeResult]:
+    return [
+        OutcomeResult(
+            type=outcome.type.strip().lower() if outcome.type else None,
+            title=outcome.title,
+            description=outcome.description,
+            population_description=outcome.population_description,
+            reporting_status=outcome.reporting_status,
+            anticipated_posting_date=outcome.anticipated_posting_date,
+            param_type=outcome.param_type,
+            dispersion_type=outcome.dispersion_type,
+            unit_of_measure=outcome.unit_of_measure,
+            time_frame=outcome.time_frame,
+            type_units_analyzed=outcome.type_units_analyzed,
+            denom_units_selected=outcome.denom_units_selected,
+            calculate_pct=outcome.calculate_pct,
+            groups=_result_groups(outcome.groups),
+            denominators=_denominators(outcome.denoms),
+            classes=_measure_classes(outcome.classes),
+            analyses=[
+                OutcomeAnalysis(
+                    group_ids=analysis.group_ids,
+                    group_description=analysis.group_description,
+                    tested_non_inferiority=analysis.tested_non_inferiority,
+                    non_inferiority_type=analysis.non_inferiority_type,
+                    non_inferiority_comment=analysis.non_inferiority_comment,
+                    p_value=analysis.p_value,
+                    p_value_comment=analysis.p_value_comment,
+                    statistical_method=analysis.statistical_method,
+                    statistical_comment=analysis.statistical_comment,
+                    param_type=analysis.param_type,
+                    param_value=analysis.param_value,
+                    dispersion_type=analysis.dispersion_type,
+                    dispersion_value=analysis.dispersion_value,
+                    ci_pct_value=analysis.ci_pct_value,
+                    ci_num_sides=analysis.ci_num_sides,
+                    ci_lower_limit=analysis.ci_lower_limit,
+                    ci_lower_limit_comment=analysis.ci_lower_limit_comment,
+                    ci_upper_limit=analysis.ci_upper_limit,
+                    ci_upper_limit_comment=analysis.ci_upper_limit_comment,
+                    estimate_comment=analysis.estimate_comment,
+                    other_analysis_description=analysis.other_analysis_description,
+                )
+                for analysis in outcome.analyses
+            ],
+        )
+        for outcome in module.outcome_measures
+    ]
+
+
+def _adverse_event_list(events) -> list[AdverseEvent]:
+    return [
+        AdverseEvent(
+            term=event.term,
+            organ_system=event.organ_system,
+            source_vocabulary=event.source_vocabulary,
+            assessment_type=event.assessment_type,
+            notes=event.notes,
+            stats=[
+                EventStat(
+                    group_id=stat.group_id,
+                    num_affected=stat.num_affected,
+                    num_at_risk=stat.num_at_risk,
+                    num_events=stat.num_events,
+                )
+                for stat in event.stats
+            ],
+        )
+        for event in events
+    ]
+
+
+def _adverse_events(module) -> AdverseEvents:
+    return AdverseEvents(
+        frequency_threshold=module.frequency_threshold,
+        time_frame=module.time_frame,
+        description=module.description,
+        all_cause_mortality_comment=module.all_cause_mortality_comment,
+        event_groups=[
+            AdverseEventGroup(
+                id=group.id,
+                title=group.title,
+                description=group.description,
+                serious_num_affected=group.serious_num_affected,
+                serious_num_at_risk=group.serious_num_at_risk,
+                other_num_affected=group.other_num_affected,
+                other_num_at_risk=group.other_num_at_risk,
+                deaths_num_affected=group.deaths_num_affected,
+                deaths_num_at_risk=group.deaths_num_at_risk,
+            )
+            for group in module.event_groups
+        ],
+        serious_events=_adverse_event_list(module.serious_events),
+        other_events=_adverse_event_list(module.other_events),
+    )
+
+
+def _results(results_section) -> Optional[TrialResults]:
+    """Map a posted results section, or return None when the record has none."""
+    if results_section is None:
+        return None
+    return TrialResults(
+        participant_flow=_participant_flow(
+            results_section.participant_flow_module
+        ),
+        baseline=_baseline(results_section.baseline_characteristics_module),
+        outcome_results=_outcome_results(
+            results_section.outcome_measures_module
+        ),
+        adverse_events=_adverse_events(results_section.adverse_events_module),
+    )
+

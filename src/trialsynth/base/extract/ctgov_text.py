@@ -6,19 +6,24 @@ place -- ``CTFetcher`` -- rather than re-walked from raw API JSON here. That
 also means no per-record network fetch: a trial missing from the dump is
 treated as having no record, and re-running the ctgov fetch widens coverage.
 
-What a registry record can support is protocol-as-planned. ``API_FIELDS`` in
-the config carries no results or outcome-measures module, only outcome measure
-*names*, so there are no metric values and no adverse events to extract --
-which is why the ctgov result schema asks for neither.
-
 A field is rendered only if the result schema can draw on it -- criteria
-source, or somewhere a biomarker gets named. Everything else (phase, design,
-enrollment, status, locations, the age/sex/healthy-volunteer fields) costs
-tokens and hands a hallucinated criterion a real line to anchor to.
+source, arm source, or somewhere a biomarker gets named. Everything else
+(phase, design, enrollment, status, locations, the age/sex/healthy-volunteer
+fields) costs tokens and hands a hallucinated criterion a real line to anchor
+to.
 
-ponytail: protocol-only ceiling. To extract reported results and adverse
-events, add the results modules to ``API_FIELDS`` and the matching fields to
-``Trial``; this module and the corpus stay as they are.
+Two layers of record are rendered, and they answer different questions. The
+protocol layer is as-planned: ``armGroups`` carries a name, a role and
+whatever dose its description states. The results layer, present on 13% of
+records, is as-run: how each group was actually dosed, how participants were
+recruited and how they were assigned.
+
+Nothing numeric is rendered from either layer. Counts, measurements, p-values
+and adverse-event tallies arrive exact and typed from the API and are mapped
+onto :class:`~trialsynth.base.models.TrialResults`; routing them through a
+model would convert exact values into probable ones. Numbers already inside a
+prose field stay where they are -- the sentence is unreadable without them --
+but no schema field asks for one.
 """
 
 import functools
@@ -67,6 +72,16 @@ def resolve_nct_ids() -> list[str]:
     return sorted(trials_by_nct())
 
 
+def _unescape(text: str) -> str:
+    """Strip the registry's backslash escaping (``mg/m\\^2``, ``\\&``)."""
+    return text.replace("\\n", "\n").replace("\\", "")
+
+
+def _prose(text: str) -> str:
+    """Unescape a prose field and flatten it to one line, so a dose stays on its group's line."""
+    return " ".join(_unescape(text).split())
+
+
 def _criteria_text(criteria: str) -> str:
     """Normalize the registry's criteria blob to one criterion per line.
 
@@ -74,7 +89,7 @@ def _criteria_text(criteria: str) -> str:
     added later, by :func:`_terminate` over every rendered line.
     """
     lines = []
-    for line in criteria.replace("\\n", "\n").replace("\\", "").splitlines():
+    for line in _unescape(criteria).splitlines():
         line = line.strip().lstrip("*-• \t").strip()
         if line:
             lines.append(line)
@@ -95,6 +110,48 @@ def _terminate(line: str) -> str:
     if not line or line[-1] in ".!?:":
         return line
     return f"{line}."
+
+
+def _results_lines(results) -> list[str]:
+    """Render the prose a posted results section carries, and only the prose.
+
+    The module docstring says why nothing numeric is rendered. The group
+    roster is printed once: the registry repeats it inside every outcome
+    measure, which on a record with 55 measures is 83% of the prose.
+    """
+    flow = results.participant_flow
+    baseline = results.baseline
+    events = results.adverse_events
+    lines: list[str] = []
+
+    # Deduplicated by title: the same group appears under a different ID in
+    # each module (FG000, BG000, OG000, EG000), and the title is what the
+    # model can quote back to attribute a dose.
+    roster: dict[str, str] = {}
+    for group in (
+        *(flow.groups if flow else []),
+        *(baseline.groups if baseline else []),
+        *(events.event_groups if events else []),
+        *(g for o in results.outcome_results for g in o.groups),
+    ):
+        if group.title and group.title not in roster:
+            roster[group.title] = group.description or ""
+    if roster:
+        lines.append("Results groups:")
+        lines += [
+            f"- {title}: {_prose(desc)}" if desc else f"- {title}"
+            for title, desc in roster.items()
+        ]
+
+    if flow:
+        for label, value in (
+            ("Recruitment", flow.recruitment_details),
+            ("Pre-assignment", flow.pre_assignment_details),
+        ):
+            if value:
+                lines.append(f"{label}: {_prose(value)}")
+
+    return lines
 
 
 def render_trial(trial: Trial) -> str:
@@ -122,6 +179,25 @@ def render_trial(trial: Trial) -> str:
     add("Brief title", trial.title)
     add("Official title", trial.official_title)
     add("Conditions", ", ".join(c.text for c in trial.conditions if c.text))
+
+    # Arm label and type are structured registry fields, but they are rendered
+    # anyway: the arm description is the only place a planned dose lives, and a
+    # dose is only attributable once the line it sits on names its arm.
+    arms = []
+    for arm in trial.arm_groups:
+        if not arm.label:
+            continue
+        head = f"- {arm.label}"
+        if arm.type:
+            head = f"{head} ({arm.type.replace('_', ' ')})"
+        if arm.description:
+            head = f"{head}: {arm.description}"
+        if arm.intervention_names:
+            head = f"{_terminate(head)} Assigned: {'; '.join(arm.intervention_names)}"
+        arms.append(head)
+    if arms:
+        sections.append("Arms:")
+        sections.extend(arms)
 
     # The registry type ("drug", "device") goes with the other structured
     # fields; only the name and description can name a biomarker.
@@ -154,6 +230,10 @@ def render_trial(trial: Trial) -> str:
     if trial.eligibility.criteria:
         sections.append("Eligibility criteria:")
         sections.append(_criteria_text(trial.eligibility.criteria))
+
+    # Only 13% of records carry results. The rest render exactly as before.
+    if trial.results:
+        sections.extend(_results_lines(trial.results))
 
     return "\n".join(
         _terminate(line) for section in sections for line in section.splitlines()

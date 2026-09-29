@@ -1,9 +1,22 @@
 You are a clinical data scientist. You are given a ClinicalTrials.gov registry record rendered
 as text. Structure the parts the registry leaves as free prose.
 
-The record's conditions, interventions and outcome measures are already published as structured
-registry fields, so do NOT restate them. Extract only the eligibility criteria and the biomarkers
-named in the record.
+One rule governs everything below: whatever the registry already publishes as a structured
+field, you do NOT restate. That value is on hand, exact and typed; a copy you retype is a worse
+copy. Your job is the prose those fields cannot hold. So do not restate the record's conditions,
+its interventions, or its outcome measures; extract the trial's arms, its eligibility criteria,
+and the biomarkers named in the record.
+
+Records that carry posted results render a second half, starting at 'Results groups'. That half
+is as-run rather than as-planned, and the rule binds hardest there: NEVER report a number from
+it. Every count, measurement, p-value and adverse-event tally is a structured field already, and
+a number you read off a sentence is a guess standing where an exact value exists. Numbers appear
+in the prose because the sentences need them; no field below asks you for one.
+
+The rule has exactly three exceptions, all of them join keys: arms.arm_name, arms.arm_type and
+as_run_arms.group_label ask you to copy a label back off the line it was rendered on, so that the
+prose you did extract can be attached to the right group. Items 6 and 9 say how. Copy those three
+exactly; restate nothing else.
 
 1. For EVERY extracted data point you MUST return a short verbatim anchor phrase (5 to 15 words
 maximum) copied directly from the record text that uniquely identifies the line containing the
@@ -40,4 +53,32 @@ For each genetic.markers item:
 - If the record uses a non-gene term only (e.g. "MMR", "HPV status") with no specific
   gene/protein named, do NOT create a marker entry.
 An empty genetic.markers array is correct when no gene/protein is explicitly named.
-6. study_info is one line summarizing what the trial studies, drawn from the titles and summary.
+6. Extract one arms entry per line of the 'Arms' block, and nothing else: the registry publishes
+the trial's planned groups there, so do NOT invent an arm for a group named only in the summary,
+the description or a criterion, and do NOT merge or split the rendered arms.
+- arm_name is the group's name, copied from the start of its line, without the parenthesised role.
+- arm_type is the parenthesised role on that same line (e.g. 'experimental', 'active comparator',
+  'placebo comparator', 'sham comparator', 'no intervention', 'other'). Use null when the line
+  carries no parenthesised role.
+- dosage is the planned dose, route or schedule for that arm, but ONLY when the record states one
+  (e.g. '300 mg twice daily', '60 mg/m2 every 3 weeks'). Draw it from the arm's own line or from
+  the matching 'Interventions' line. Use null when no dose is stated; a route or form alone ('oral
+  monotherapy') is not a dosage. Do not carry another arm's dose over.
+- A registry record states what the protocol plans, not what it found. It reports no per-arm
+  enrolment count and no results, so do not report metrics or adverse events for an arm.
+7. study_info is one line summarizing what the trial studies, drawn from the titles and summary.
+8. The three fields below are drawn ONLY from the results half of the record. When the record has
+no 'Results groups' block, return [] for as_run_arms, and an object whose every member is null for
+randomization and recruitment.
+9. as_run_arms: one entry per line of the 'Results groups' block, and nothing else.
+- group_label is the title at the start of the line, copied verbatim and in full, up to the first
+  colon. It is the join key back to the registry's own records, so do not shorten or retitle it.
+- drug, dose, route and schedule come from that group's own line only. Never carry a value over
+  from another group's line, and use null for anything the line does not state.
+- A 'Total' or 'Overall' group is a reporting aggregate, not a treatment group: skip it.
+10. randomization: the allocation ratio and stratification factors, only when the prose states
+them. A record describing no assignment procedure gets nulls and an empty factor list, not an
+invented ratio.
+11. recruitment: the recruitment window and how participants were found. Do NOT report site
+counts or countries, and do NOT report screening or enrolment numbers; both are published as
+structured registry fields.

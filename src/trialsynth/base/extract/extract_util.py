@@ -150,6 +150,18 @@ def resolve_anchors(raw: dict, sentences: list[str]) -> dict:
         a = item.pop("evidence_anchor", "")
         item["evidence_text"] = best_sentence_for_anchor(a, sentences)
 
+    # Fields drawn from a record's posted results. Each is empty or null on
+    # the 87% of registry records that carry no results section, and a null
+    # anchor resolves to "" rather than to None. randomization and
+    # recruitment are objects rather than arrays.
+    objs = (
+        v for k in ("randomization", "recruitment")
+        if isinstance(v := raw.get(k), dict)
+    )
+    for item in [*raw.get("as_run_arms", []), *objs]:
+        a = item.pop("evidence_anchor", "") or ""
+        item["evidence_text"] = best_sentence_for_anchor(a, sentences)
+
     return raw
 
 

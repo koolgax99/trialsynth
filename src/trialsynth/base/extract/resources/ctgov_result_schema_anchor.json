@@ -5,6 +5,43 @@
       "type": "string",
       "description": "One-line summary of what the trial studies, from the titles and summary."
     },
+    "arms": {
+      "type": "array",
+      "description": "The trial's planned participant groups, one entry per line of the record's 'Arms' block. Protocol-as-planned: an arm has no enrolled count, no metrics and no adverse events, even on a record that posts results; what a group was actually given belongs to 'as_run_arms'.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "arm_name": {
+            "type": "string",
+            "description": "The group's name as the protocol writes it, without the parenthesised role, e.g. 'Rucaparib'."
+          },
+          "arm_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The group's role as rendered in parentheses on its line, e.g. 'experimental', 'active comparator', 'placebo comparator'. Null when the line carries no role."
+          },
+          "dosage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Planned dose, route or schedule for this arm, only when the record states one, e.g. '300 mg twice daily'. Null otherwise."
+          },
+          "evidence_anchor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "arm_name",
+          "arm_type",
+          "dosage",
+          "evidence_anchor"
+        ],
+        "additionalProperties": false
+      }
+    },
     "inclusion_criteria": {
       "type": "array",
       "description": "One entry per distinct requirement a participant must meet to enrol, split out of the registry's free-text criteria blob. Split compound criteria into separate entries when they state independent requirements.",
@@ -91,13 +128,136 @@
         "reasoning"
       ],
       "additionalProperties": false
+    },
+    "as_run_arms": {
+      "type": "array",
+      "description": "How each group was actually dosed, one entry per line of the 'Results groups' block. As-run, so it may differ from 'arms': groups merge, a dose-finding cohort splits, a planned arm never enrols. Empty when the record has no results.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "group_label": {
+            "type": "string",
+            "description": "The group's title, copied verbatim from the start of its line in 'Results groups'. Used to join back to the registry's own group records, so it must match exactly."
+          },
+          "drug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent this group received, as named on the line. Null when the group received no agent, e.g. a placebo or observation group."
+          },
+          "dose": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Dose with its unit, e.g. '240 mg/m^2'. Null when the line states none."
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Route of administration, e.g. 'IV', 'oral'. Null when unstated."
+          },
+          "schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Dosing schedule as stated, e.g. 'once daily on Days 1 to 3 of each 21-day cycle'. Null when unstated."
+          },
+          "evidence_anchor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "group_label",
+          "drug",
+          "dose",
+          "route",
+          "schedule",
+          "evidence_anchor"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "randomization": {
+      "type": "object",
+      "description": "How participants were assigned, when the results prose states it. Null when the record does not.",
+      "properties": {
+        "ratio": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Allocation ratio as written, e.g. '1:1'. Null when unstated."
+        },
+        "stratification_factors": {
+          "type": "array",
+          "description": "Factors randomisation was stratified by, e.g. 'ECOG performance status (0 to 1 versus 2)'. Empty when none stated.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_anchor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Null when nothing was found for this field."
+        }
+      },
+      "required": [
+        "ratio",
+        "stratification_factors",
+        "evidence_anchor"
+      ],
+      "additionalProperties": false
+    },
+    "recruitment": {
+      "type": "object",
+      "description": "Recruitment context from the results prose. Every member is null when the record has no results. Site counts and countries are omitted on purpose: the registry publishes them as structured location records.",
+      "properties": {
+        "window": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "When recruitment ran, as stated, e.g. 'January 2015 to August 2016'. Null when unstated."
+        },
+        "channel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "How participants were found, e.g. 'advertisements around campus and the Pitt+Me registry'. Null when unstated."
+        },
+        "evidence_anchor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Null when nothing was found for this field."
+        }
+      },
+      "required": [
+        "window",
+        "channel",
+        "evidence_anchor"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
     "study_info",
+    "arms",
     "inclusion_criteria",
     "exclusion_criteria",
-    "genetic"
+    "genetic",
+    "as_run_arms",
+    "randomization",
+    "recruitment"
   ],
   "additionalProperties": false
 }
