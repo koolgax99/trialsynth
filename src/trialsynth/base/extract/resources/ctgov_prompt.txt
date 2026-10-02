@@ -67,8 +67,8 @@ the description or a criterion, and do NOT merge or split the rendered arms.
 - A registry record states what the protocol plans, not what it found. It reports no per-arm
   enrolment count and no results, so do not report metrics or adverse events for an arm.
 7. study_info is one line summarizing what the trial studies, drawn from the titles and summary.
-8. The three fields below are drawn ONLY from the results half of the record. When the record has
-no 'Results groups' block, return [] for as_run_arms, and an object whose every member is null for
+8. as_run_arms, randomization and recruitment are drawn ONLY from the results half of the record.
+When the record has no 'Results groups' block, return [] for as_run_arms and null for
 randomization and recruitment.
 9. as_run_arms: one entry per line of the 'Results groups' block, and nothing else.
 - group_label is the title at the start of the line, copied verbatim and in full, up to the first

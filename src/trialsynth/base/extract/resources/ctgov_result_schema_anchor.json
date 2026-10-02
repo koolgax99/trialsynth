@@ -183,8 +183,11 @@
       }
     },
     "randomization": {
-      "type": "object",
-      "description": "How participants were assigned, when the results prose states it. Null when the record does not.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "How participants were assigned, drawn from the results prose. Null when the record has no results.",
       "properties": {
         "ratio": {
           "type": [
@@ -216,8 +219,11 @@
       "additionalProperties": false
     },
     "recruitment": {
-      "type": "object",
-      "description": "Recruitment context from the results prose. Every member is null when the record has no results. Site counts and countries are omitted on purpose: the registry publishes them as structured location records.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Recruitment context from the results prose. Null when the record has no results. Site counts and countries are omitted on purpose: the registry publishes them as structured location records.",
       "properties": {
         "window": {
           "type": [
