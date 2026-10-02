@@ -1,29 +1,12 @@
-"""Render ClinicalTrials.gov registry records as extraction source text.
+"""Build extraction source text from ClinicalTrials.gov records.
 
-The text comes from the pickled :class:`~trialsynth.base.models.Trial` dump the
-ctgov pipeline already writes, so registry fields are mapped in exactly one
-place -- ``CTFetcher`` -- rather than re-walked from raw API JSON here. That
-also means no per-record network fetch: a trial missing from the dump is
-treated as having no record, and re-running the ctgov fetch widens coverage.
+This file contains functions that put together the prose and structured
+fields of a ctgov trial (criteria, arm groups and the descriptive parts of
+posted results) into text provided to the LLM. Only fields the extraction
+schema draws on are included.
 
-A field is rendered only if the result schema can draw on it -- criteria
-source, arm source, or somewhere a biomarker gets named. Everything else
-(phase, design, enrollment, status, locations, the age/sex/healthy-volunteer
-fields) costs tokens and hands a hallucinated criterion a real line to anchor
-to.
-
-Two layers of record are rendered, and they answer different questions. The
-protocol layer is as-planned: ``armGroups`` carries a name, a role and
-whatever dose its description states. The results layer, present on 13% of
-records, is as-run: how each group was actually dosed, how participants were
-recruited and how they were assigned.
-
-Nothing numeric is rendered from either layer. Counts, measurements, p-values
-and adverse-event tallies arrive exact and typed from the API and are mapped
-onto :class:`~trialsynth.base.models.TrialResults`; routing them through a
-model would convert exact values into probable ones. Numbers already inside a
-prose field stay where they are -- the sentence is unreadable without them --
-but no schema field asks for one.
+Numerical values are omitted from the generated text since they can be
+extracted verbatim without the involvement of an extraction step.
 """
 
 import functools
@@ -78,7 +61,7 @@ def _unescape(text: str) -> str:
 
 
 def _prose(text: str) -> str:
-    """Unescape a prose field and flatten it to one line, so a dose stays on its group's line."""
+    """Unescape and flatten to one line, so a dose stays on its group's line."""
     return " ".join(_unescape(text).split())
 
 
@@ -96,15 +79,16 @@ def _criteria_text(criteria: str) -> str:
     return "\n".join(lines)
 
 
-def _terminate(line: str) -> str:
-    """End ``line`` with sentence punctuation unless it already has some.
+def _flatten(text: str) -> str:
+    """Join a multi-line description to one line, so every dose sits on its arm's line."""
+    return " ".join(_terminate(line) for line in _criteria_text(text).splitlines())
 
-    ``resolve_anchors`` locates evidence by splitting the source text on
-    sentence punctuation (``extract_util.split_sentences``) after collapsing
-    whitespace, so a line with no terminator merges into the next one. Without
-    this every anchor in a registry record resolves to the same enormous
-    sentence. Lines already ending in ``:`` are left alone so a heading stays
-    attached to what it introduces.
+
+def _terminate(line: str) -> str:
+    """End ``line`` with a full stop unless it already ends in ``.!?:``.
+
+    ``resolve_anchors`` splits on sentence punctuation, so an unterminated
+    line merges into the next one.
     """
     line = line.rstrip()
     if not line or line[-1] in ".!?:":
@@ -113,20 +97,16 @@ def _terminate(line: str) -> str:
 
 
 def _results_lines(results) -> list[str]:
-    """Render the prose a posted results section carries, and only the prose.
+    """Render the prose of a results section: group roster and flow details.
 
-    The module docstring says why nothing numeric is rendered. The group
-    roster is printed once: the registry repeats it inside every outcome
-    measure, which on a record with 55 measures is 83% of the prose.
+    The roster is printed once; the registry repeats it in every outcome measure.
     """
     flow = results.participant_flow
     baseline = results.baseline
     events = results.adverse_events
     lines: list[str] = []
 
-    # Deduplicated by title: the same group appears under a different ID in
-    # each module (FG000, BG000, OG000, EG000), and the title is what the
-    # model can quote back to attribute a dose.
+    # Keyed by title: each module gives the same group its own ID (FG000, BG000...).
     roster: dict[str, str] = {}
     for group in (
         *(flow.groups if flow else []),
@@ -174,7 +154,7 @@ def render_trial(trial: Trial) -> str:
     def add(label: str, value) -> None:
         if not value:
             return
-        sections.append(f"{label}: {value}")
+        sections.append(f"{label}: {_unescape(value)}")
 
     add("Brief title", trial.title)
     add("Official title", trial.official_title)
@@ -191,7 +171,7 @@ def render_trial(trial: Trial) -> str:
         if arm.type:
             head = f"{head} ({arm.type.replace('_', ' ')})"
         if arm.description:
-            head = f"{head}: {arm.description}"
+            head = f"{head}: {_flatten(arm.description)}"
         if arm.intervention_names:
             head = f"{_terminate(head)} Assigned: {'; '.join(arm.intervention_names)}"
         arms.append(head)
@@ -202,7 +182,7 @@ def render_trial(trial: Trial) -> str:
     # The registry type ("drug", "device") goes with the other structured
     # fields; only the name and description can name a biomarker.
     interventions = [
-        f"- {i.text}: {i.description}" if i.description else f"- {i.text}"
+        f"- {i.text}: {_flatten(i.description)}" if i.description else f"- {i.text}"
         for i in trial.interventions
         if i.text
     ]

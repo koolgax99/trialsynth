@@ -17,6 +17,7 @@ from tqdm import tqdm
 DEFAULT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_MAX_JOBS = 10
+DEFAULT_TIMEOUT_HOURS = 24
 TERMINAL_JOB_STATUSES = ("Completed", "Failed", "Stopped", "PartiallyCompleted")
 INPUT_FILE_RE = re.compile(r"_input_(\d+)\.jsonl$", re.IGNORECASE)
 S3_URI_RE = re.compile(r"s3://[^/\s]+(?:/[^\s]*)?")
@@ -171,6 +172,7 @@ def extract_trial_data_bedrock_batch(
     model_id: str = DEFAULT_MODEL,
     poll_interval: int = 60,
     wait: bool = True,
+    timeout_hours: int = DEFAULT_TIMEOUT_HOURS,
 ) -> str:
     """Submit a Bedrock batch inference job.
 
@@ -192,6 +194,9 @@ def extract_trial_data_bedrock_batch(
     wait :
         If True, poll until the job reaches a terminal status. Default is
         True.
+    timeout_hours :
+        Hours Bedrock lets the job run before it expires (24-168). Default
+        is 24.
 
     Returns
     -------
@@ -230,6 +235,7 @@ def extract_trial_data_bedrock_batch(
                 "s3Uri": s3_output_path,
             }
         },
+        timeoutDurationInHours=timeout_hours,
     )
     job_arn = response["jobArn"]
     click.echo(f"Submitted batch job {job_name}: {job_arn}")
@@ -249,6 +255,7 @@ def extract_trial_data_bedrock_batch_many(
     poll_interval: int = 60,
     wait: bool = False,
     max_jobs: int = DEFAULT_MAX_JOBS,
+    timeout_hours: int = DEFAULT_TIMEOUT_HOURS,
 ) -> list[str]:
     """Submit Bedrock batch jobs for ``*_input_{N}.jsonl`` files under a prefix.
 
@@ -277,6 +284,9 @@ def extract_trial_data_bedrock_batch_many(
         False.
     max_jobs :
         Maximum number of new jobs to create. Default is 10.
+    timeout_hours :
+        Hours Bedrock lets each job run before it expires (24-168). Default
+        is 24.
 
     Returns
     -------
@@ -335,6 +345,7 @@ def extract_trial_data_bedrock_batch_many(
                 model_id=model_id,
                 poll_interval=poll_interval,
                 wait=False,
+                timeout_hours=timeout_hours,
             )
         except ClientError as exc:
             if _is_duplicate_job_error(exc):
@@ -648,6 +659,13 @@ def extract_trial_data_openai(
         "Already-submitted names do not count toward the limit."
     ),
 )
+@click.option(
+    "--timeout-hours",
+    type=click.IntRange(24, 168),
+    default=DEFAULT_TIMEOUT_HOURS,
+    show_default=True,
+    help="batch mode: hours before Bedrock expires an unfinished job.",
+)
 def main(
     mode: str,
     s3_input_jsonl_path: str,
@@ -660,6 +678,7 @@ def main(
     poll_interval: int,
     wait: bool | None,
     max_jobs: int,
+    timeout_hours: int,
 ) -> None:
     """Extract trial data with Amazon Bedrock or an OpenAI-compatible server.
 
@@ -710,6 +729,7 @@ def main(
                 model_id=model_id,
                 poll_interval=poll_interval,
                 wait=True if wait is None else wait,
+                timeout_hours=timeout_hours,
             )
         else:
             extract_trial_data_bedrock_batch_many(
@@ -721,6 +741,7 @@ def main(
                 poll_interval=poll_interval,
                 wait=False if wait is None else wait,
                 max_jobs=max_jobs,
+                timeout_hours=timeout_hours,
             )
     else:
         if not _is_jsonl_object_uri(s3_input_jsonl_path):
