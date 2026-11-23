@@ -15,7 +15,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from indra.literature.pmc_client import id_lookup, get_text_s3
-from indra.literature.pubmed_client import get_abstract, get_metadata_for_all_ids
+from indra.literature.pubmed_client import get_abstract, get_metadata_for_ids
 
 from trialsynth.ctgov.config import CTConfig
 from trialsynth.base.extract.paths import PMID_TEXTS_CACHE
@@ -193,12 +193,16 @@ def get_trial_pmids() -> list[str]:
     return sorted(intersection)
 
 
-def get_pmid_texts(pmids: list[str], max_workers: int = 8) -> dict:
+def get_pmid_texts(
+    pmids: list[str], max_workers: int = 8
+) -> tuple[dict, set[str]]:
     """Return title, abstract, and full text for each PMID.
 
     Tries the SQLite lite DB first when configured, then the Postgres
     INDRA DB, then PubMed metadata and PMC S3. Full text is preferred
-    over abstract. Title is always included.
+    over abstract. Title is always included. A failed PubMed or PMC
+    request marks only the PMIDs it covered as failed; the rest of the
+    run continues.
 
     Parameters
     ----------
@@ -212,11 +216,14 @@ def get_pmid_texts(pmids: list[str], max_workers: int = 8) -> dict:
     -------
     :
         Mapping from PMID to a dict with ``title`` and optionally
-        ``abstract`` or ``fulltext``.
+        ``abstract`` or ``fulltext``, and the set of PMIDs whose PubMed or
+        PMC lookup raised or returned no response. Their records may be
+        incomplete, so callers should not cache them.
     """
     pmid_strs = set(str(pmid) for pmid in pmids)
     out = {pmid: {"title": ""} for pmid in pmid_strs}
     filled = set()
+    failed = set()
     pbar = tqdm.tqdm(
         total=len(pmid_strs), desc="Fetching PMID texts", unit="pmid"
     )
@@ -329,12 +336,29 @@ def get_pmid_texts(pmids: list[str], max_workers: int = 8) -> dict:
     ]
     try:
         if need_live:
-            metadata = get_metadata_for_all_ids(
-                need_live, get_abstracts=True, prepend_title=False
-            ) or {}
+            # Not get_metadata_for_all_ids: one bad response there fails the
+            # whole run, here only its own batch.
+            metadata = {}
+            for i in tqdm.tqdm(
+                range(0, len(need_live), 200), desc="Retrieving metadata"
+            ):
+                batch = need_live[i:i + 200]
+                try:
+                    batch_meta = get_metadata_for_ids(
+                        batch, get_abstracts=True, prepend_title=False
+                    )
+                except Exception as e:
+                    logger.warning("PubMed metadata batch failed: %s", e)
+                    batch_meta = None
+                if batch_meta is None:
+                    failed.update(batch)
+                else:
+                    metadata.update(batch_meta)
             missing = []
             s3_jobs = []
             for pmid in need_live:
+                if pmid in failed:
+                    continue
                 rec = metadata.get(pmid)
                 if rec is None:
                     missing.append(pmid)
@@ -365,6 +389,7 @@ def get_pmid_texts(pmids: list[str], max_workers: int = 8) -> dict:
                             text = fut.result()
                         except Exception as e:
                             logger.info("%s - S3 FAILED: %s", pmid, e)
+                            failed.add(pmid)
                             text = None
                         if text:
                             out[pmid]["fulltext"] = text
@@ -388,9 +413,10 @@ def get_pmid_texts(pmids: list[str], max_workers: int = 8) -> dict:
                 except Exception as e:
                     print("DEBUG: FAILED: %s", e)
                     logger.info("%s - FAILED: %s", pmid, e)
+                    failed.add(pmid)
     finally:
         pbar.close()
-    return out
+    return out, failed
 
 
 def download_texts_bulk(pmids: list[str], max_workers: int = 8, cache_path=None) -> dict:
@@ -398,8 +424,8 @@ def download_texts_bulk(pmids: list[str], max_workers: int = 8, cache_path=None)
 
     Loads the gzipped JSON cache, fetches only missing PMIDs via
     ``get_pmid_texts``, and merges records that have a title, abstract,
-    or full text. Fully empty results are not stored so later runs retry
-    them.
+    or full text. Fully empty results and PMIDs whose lookup failed are
+    not stored so later runs retry them.
 
     Parameters
     ----------
@@ -431,10 +457,12 @@ def download_texts_bulk(pmids: list[str], max_workers: int = 8, cache_path=None)
     if not pending:
         return cache
 
-    fetched = get_pmid_texts(pending, max_workers=max_workers)
+    fetched, failed = get_pmid_texts(pending, max_workers=max_workers)
     n_added = 0
     n_empty = 0
     for pmid in pending:
+        if pmid in failed:
+            continue
         fetched_rec = fetched.get(pmid) or {}
         title = (fetched_rec.get("title") or "").strip()
         abstract = (fetched_rec.get("abstract") or "").strip()
@@ -458,7 +486,8 @@ def download_texts_bulk(pmids: list[str], max_workers: int = 8, cache_path=None)
 
     logger.info(
         f"Bulk download complete: {n_added} cached, {n_empty} with no "
-        f"content, {skipped} already present"
+        f"content, {len(failed)} failed (retried next run), {skipped} "
+        f"already present"
     )
     return cache
 
