@@ -16,7 +16,9 @@ from trialsynth.base.extract.process_bedrock import _iter_lines, _jsonl_paths, _
 
 logger = logging.getLogger(__name__)
 
-RETRYABLE_STOP_REASONS = {"max_tokens", "content_filter"}
+RETRYABLE_STOP_REASONS = {"max_tokens", "refusal", "error"}
+# Not token-related, so resubmitted at the same max_tokens.
+SAME_TIER_STOP_REASONS = {"refusal", "error"}
 RETRY_TOKEN_LADDER = [32000, 64000]
 
 
@@ -42,8 +44,11 @@ def _read_failures(path: Path) -> dict[str, str]:
 
 def _recover_records(
     jsonl_paths: list[Path], record_ids: set[str], corpus: Corpus
-) -> dict[str, tuple[str, int]]:
-    """Recover ``(source_text, current_max_tokens)`` for ``record_ids``."""
+) -> dict[str, tuple[str, int, str | None, str | None]]:
+    """Recover ``(source_text, max_tokens, thinking, effort)`` for ``record_ids``.
+
+    ``thinking`` and ``effort`` are what the original request set, or ``None``.
+    """
     recovered = {}
     remaining = set(record_ids)
     for _, _, line in _iter_lines(jsonl_paths):
@@ -57,10 +62,16 @@ def _recover_records(
             text = _source_text(rec, corpus)
         except ValueError:
             continue
-        max_tokens = (rec.get("modelInput") or {}).get("max_tokens")
+        model_input = rec.get("modelInput") or {}
+        max_tokens = model_input.get("max_tokens")
         if not isinstance(max_tokens, int):
             continue
-        recovered[record_id] = (text, max_tokens)
+        recovered[record_id] = (
+            text,
+            max_tokens,
+            (model_input.get("thinking") or {}).get("type"),
+            (model_input.get("output_config") or {}).get("effort"),
+        )
         remaining.discard(record_id)
     return recovered
 
@@ -101,35 +112,42 @@ def main(
             f"from {input_path}: {preview}"
         )
 
-    # Group records by their target max_tokens, since an escalation ladder
-    # means different records can be due for different tiers. content_filter
-    # isn't token-related, so it's resubmitted unchanged rather than escalated.
-    by_tier: dict[int, list[tuple[str, str]]] = {}
+    # Records can be due for different tiers, and keep their original
+    # thinking and effort, so each combination gets its own files.
+    by_tier: dict[
+        tuple[int, str | None, str | None], list[tuple[str, str]]
+    ] = {}
     for rid in sorted(retry_ids):
-        text, current_max_tokens = recovered[rid]
+        text, current_max_tokens, thinking, effort = recovered[rid]
         if retry_max_tokens is not None:
             tier = retry_max_tokens
-        elif failures[rid] == "content_filter":
+        elif failures[rid] in SAME_TIER_STOP_REASONS:
             tier = current_max_tokens
         else:
             tier = _next_tier(current_max_tokens)
         if tier is None:
             manual_ids.add(rid)
             continue
-        by_tier.setdefault(tier, []).append((rid, text))
+        by_tier.setdefault((tier, thinking, effort), []).append((rid, text))
 
     _write_manual_review(manual_review_out, manual_ids)
 
     written = []
-    for tier, records in sorted(by_tier.items()):
+    for (tier, thinking, effort), records in sorted(
+        by_tier.items(), key=lambda kv: (kv[0][0], str(kv[0][1]), str(kv[0][2]))
+    ):
         written.extend(
             build_batch_input_jsonl(
                 records,
                 out_dir=out_dir,
                 corpus=corpus,
-                prefix=f"{prefix}_{tier}",
+                prefix="_".join(
+                    str(part) for part in (prefix, tier, thinking, effort) if part
+                ),
                 max_records=max_records,
                 max_tokens=tier,
+                thinking=thinking,
+                effort=effort,
             )
         )
     return written, sorted(manual_ids)

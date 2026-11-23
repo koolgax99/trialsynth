@@ -81,6 +81,9 @@ def _parse_record(line: str, corpus: Corpus) -> tuple[str, dict, str]:
     record_id = str(record_id)
 
     model_output = rec.get("modelOutput")
+    if not model_output and rec.get("error"):
+        # Bedrock batch, and sync mode, write failed calls this way.
+        raise RecordFailure(record_id, "error", f"error={rec['error']}")
     if not model_output:
         raise ValueError("missing modelOutput")
 
@@ -91,11 +94,17 @@ def _parse_record(line: str, corpus: Corpus) -> tuple[str, dict, str]:
         )
 
     content = model_output.get("content") or []
-    if not content or not isinstance(content[0], dict):
-        raise ValueError("modelOutput.content is empty or malformed")
-    text = content[0].get("text")
+    # Models with thinking on (e.g. Haiku 5.5) put thinking blocks first.
+    text = next(
+        (
+            block.get("text")
+            for block in content
+            if isinstance(block, dict) and block.get("type", "text") == "text"
+        ),
+        None,
+    )
     if not text:
-        raise ValueError("modelOutput.content[0] has no text")
+        raise ValueError("modelOutput.content has no text block")
     extraction = json.loads(text)
     if not isinstance(extraction, dict):
         raise ValueError("extraction JSON is not an object")
@@ -286,6 +295,13 @@ def main(
             continue
         n_ok += 1
 
+    # A resumed sync run can leave an error line and a later success for the
+    # same record.
+    classified_failures = [
+        (rid, reason)
+        for rid, reason in classified_failures
+        if not (output_dir / f"{rid}.json").exists()
+    ]
     if failures_out is not None and classified_failures:
         failures_out.parent.mkdir(parents=True, exist_ok=True)
         with failures_out.open("w", encoding="utf-8") as fh:

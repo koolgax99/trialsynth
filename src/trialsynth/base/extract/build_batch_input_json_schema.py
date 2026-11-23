@@ -16,6 +16,8 @@ def build_batch_input_jsonl(
     prefix: str = DEFAULT_PREFIX,
     max_records: int = MAX_RECORDS_PER_FILE,
     max_tokens: int = MAX_TOKENS,
+    thinking: str | None = None,
+    effort: str | None = None,
 ) -> list[Path]:
     """Write Bedrock batch input JSONL for a corpus.
 
@@ -43,6 +45,11 @@ def build_batch_input_jsonl(
         provided, the output is split. Default is 10000.
     max_tokens :
         ``max_tokens`` to set on each model input. Default is 16000.
+    thinking :
+        ``thinking.type`` to request (``adaptive`` or ``disabled``). ``None``
+        leaves it out, so the model's own default applies.
+    effort :
+        ``output_config.effort`` to request. ``None`` leaves it out.
 
     Returns
     -------
@@ -56,6 +63,12 @@ def build_batch_input_jsonl(
         )
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    output_config: dict = {
+        "format": {"type": "json_schema", "schema": corpus.schema}
+    }
+    if effort:
+        output_config["effort"] = effort
 
     n = len(records)
     written: list[Path] = []
@@ -71,13 +84,10 @@ def build_batch_input_jsonl(
                     "messages": [
                         {"role": "user", "content": corpus.frame(record_id, text)}
                     ],
-                    "output_config": {
-                        "format": {
-                            "type": "json_schema",
-                            "schema": corpus.schema,
-                        }
-                    },
+                    "output_config": output_config,
                 }
+                if thinking:
+                    model_input["thinking"] = {"type": thinking}
                 record = {"recordId": record_id, "modelInput": model_input}
                 out.write(json.dumps(record) + "\n")
         written.append(chunk_path)
@@ -92,6 +102,8 @@ def main(
     prefix: str = DEFAULT_PREFIX,
     max_records: int = MAX_RECORDS_PER_FILE,
     max_tokens: int = MAX_TOKENS,
+    thinking: str | None = None,
+    effort: str | None = None,
 ) -> list[Path]:
     """Build batch input JSONL from record IDs.
 
@@ -114,6 +126,10 @@ def main(
         Maximum number of records per output file. Default is 10000.
     max_tokens :
         ``max_tokens`` to set on each model input. Default is 16000.
+    thinking :
+        Passed to ``build_batch_input_jsonl``.
+    effort :
+        Passed to ``build_batch_input_jsonl``.
 
     Returns
     -------
@@ -150,4 +166,6 @@ def main(
         prefix=prefix,
         max_records=max_records,
         max_tokens=max_tokens,
+        thinking=thinking,
+        effort=effort,
     )

@@ -2,9 +2,10 @@
 import os
 import re
 import json
+import logging
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse
@@ -16,11 +17,13 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_MAX_JOBS = 10
 DEFAULT_TIMEOUT_HOURS = 24
-SYNC_READ_TIMEOUT = 300
+SYNC_READ_TIMEOUT = 900
 MIN_BATCH_RECORDS = 100
 TERMINAL_JOB_STATUSES = ("Completed", "Failed", "Stopped", "PartiallyCompleted")
 INPUT_FILE_RE = re.compile(r"_input_(\d+)\.jsonl$", re.IGNORECASE)
@@ -68,7 +71,10 @@ def _count_jsonl_records(s3_uri: str) -> int:
 
 
 def _batch_fallback_to_sync(
-    s3_input_jsonl_path: str, s3_output_path: str, model_id: str
+    s3_input_jsonl_path: str,
+    s3_output_path: str,
+    model_id: str,
+    max_workers: int,
 ) -> None:
     """Run sync mode and upload the result where a batch job would have."""
     _, input_key = _parse_s3_uri(s3_input_jsonl_path)
@@ -80,6 +86,7 @@ def _batch_fallback_to_sync(
             s3_input_jsonl_path=s3_input_jsonl_path,
             output_jsonl_path=str(local_output),
             model_id=model_id,
+            max_workers=max_workers,
         )
         boto3.client("s3").upload_file(str(local_output), output_bucket, output_key)
 
@@ -417,27 +424,60 @@ def extract_trial_data_bedrock_batch_many(
     return job_arns
 
 
+def _done_record_ids(output_path: Path) -> set[str]:
+    """Return the IDs that already have a model output in ``output_path``."""
+    if not output_path.exists():
+        return set()
+    done = set()
+    with output_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                # A run killed mid-write leaves a partial last line.
+                continue
+            if rec.get("modelOutput"):
+                done.add(str(rec["recordId"]))
+    return done
+
+
+def _ends_mid_line(path: Path) -> bool:
+    with path.open("rb") as fh:
+        if fh.seek(0, os.SEEK_END) == 0:
+            return False
+        fh.seek(-1, os.SEEK_END)
+        return fh.read(1) != b"\n"
+
+
 def extract_trial_data_bedrock_sync(
     s3_input_jsonl_path: str,
     output_jsonl_path: str,
     model_id: str = DEFAULT_MODEL,
-) -> list[dict]:
-    """Invoke Bedrock synchronously for each record in an S3 JSONL file.
+    max_workers: int = 8,
+) -> tuple[int, int]:
+    """Invoke Bedrock on-demand for each record in an S3 JSONL file.
+
+    Appends to ``output_jsonl_path``, skipping records already there, so a
+    re-run resumes. Throttling is retried by botocore's adaptive mode. A record
+    that still fails is written with an ``error`` field, as Bedrock batch does.
 
     Parameters
     ----------
     s3_input_jsonl_path :
         S3 URI of the input JSONL file.
     output_jsonl_path :
-        Local path to write output JSONL records.
+        Local path to append output JSONL records to.
     model_id :
         Bedrock model ID. Default is Claude Haiku 4.5.
+    max_workers :
+        Concurrent requests to Bedrock.
 
     Returns
     -------
     :
-        List of ``{"recordId", "modelInput", "modelOutput"}`` result dicts,
-        matching the record shape Bedrock batch writes.
+        ``(n_written, n_failed)`` for this run. Each written line is a
+        ``{"recordId", "modelInput", "modelOutput"}`` dict, the record shape
+        Bedrock batch writes.
     """
     if not output_jsonl_path:
         raise ValueError("output_jsonl_path is required")
@@ -446,43 +486,74 @@ def extract_trial_data_bedrock_sync(
             f"s3_input_jsonl_path must be an S3 URI, got {s3_input_jsonl_path!r}"
         )
 
-    s3 = boto3.client("s3")
     bedrock_runtime = boto3.client(
-        "bedrock-runtime", config=Config(read_timeout=SYNC_READ_TIMEOUT)
+        "bedrock-runtime",
+        config=Config(
+            retries={"mode": "adaptive", "max_attempts": 10},
+            max_pool_connections=max_workers,
+            read_timeout=SYNC_READ_TIMEOUT,
+        ),
     )
 
-    bucket, s3_key = _parse_s3_uri(s3_input_jsonl_path)
-    obj = s3.get_object(Bucket=bucket, Key=s3_key)
-    lines = obj["Body"].read().decode("utf-8").splitlines()
-
-    output_path = Path(output_jsonl_path)
+    output_path = Path(output_jsonl_path).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    done = _done_record_ids(output_path)
+    records = [
+        rec
+        for rec in map(json.loads, _read_jsonl_lines(s3_input_jsonl_path))
+        if str(rec["recordId"]) not in done
+    ]
+    if done:
+        click.echo(f"Skipping {len(done)} records already in {output_path}")
 
-    results = []
-    with open(output_path, "w", encoding="utf-8") as out_f:
-        for line in tqdm(lines, desc="Invoking Bedrock"):
-            record = json.loads(line)
-            record_id = record["recordId"]
-            model_input = record["modelInput"]
+    def invoke(record: dict) -> dict:
+        response = bedrock_runtime.invoke_model(
+            modelId=model_id,
+            body=json.dumps(record["modelInput"]),
+            contentType="application/json",
+            accept="application/json",
+        )
+        return {
+            "recordId": record["recordId"],
+            "modelInput": record["modelInput"],
+            "modelOutput": json.loads(response["body"].read()),
+        }
 
-            response = bedrock_runtime.invoke_model(
-                modelId=model_id,
-                body=json.dumps(model_input),
-                contentType="application/json",
-                accept="application/json",
-            )
-            model_output = json.loads(response["body"].read())
+    n_written = n_failed = 0
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {pool.submit(invoke, rec): rec for rec in records}
+        with open(output_path, "a", encoding="utf-8") as out_f:
+            if _ends_mid_line(output_path):
+                # Terminate a partial line left by a killed run.
+                out_f.write("\n")
+            for future in tqdm(
+                as_completed(futures), total=len(futures), desc="Invoking Bedrock"
+            ):
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    n_failed += 1
+                    rec = futures[future]
+                    logger.warning("Record %s failed: %s", rec["recordId"], exc)
+                    result = {
+                        "recordId": rec["recordId"],
+                        "modelInput": rec["modelInput"],
+                        "error": {"errorMessage": str(exc)},
+                    }
+                else:
+                    n_written += 1
+                out_f.write(json.dumps(result) + "\n")
+                out_f.flush()
+    finally:
+        # On Ctrl-C, drop queued records; in-flight calls finish and are lost.
+        pool.shutdown(wait=True, cancel_futures=True)
 
-            result = {
-                "recordId": record_id,
-                "modelInput": model_input,
-                "modelOutput": model_output,
-            }
-            results.append(result)
-            out_f.write(json.dumps(result) + "\n")
-            out_f.flush()
-
-    return results
+    click.echo(
+        f"Wrote {n_written} records, {n_failed} failed (re-run to retry): "
+        f"{output_path}"
+    )
+    return n_written, n_failed
 
 
 def _read_jsonl_lines(path: str) -> list[str]:
@@ -532,16 +603,17 @@ def to_openai_request(model_input: dict, model: str) -> dict:
 def to_bedrock_output(response: dict) -> dict:
     """Wrap an OpenAI chat completion in the Anthropic shape Bedrock returns.
 
-    ``process`` reads ``content[0].text``; matching the shape keeps it
+    ``process`` reads the first ``text`` content block; matching the shape keeps it
     backend-agnostic.
     """
     choice = response["choices"][0]
     usage = response.get("usage") or {}
     return {
         "content": [{"type": "text", "text": choice["message"]["content"]}],
-        "stop_reason": (
-            "max_tokens" if choice.get("finish_reason") == "length" else "end_turn"
-        ),
+        "stop_reason": {
+            "length": "max_tokens",
+            "content_filter": "refusal",
+        }.get(choice.get("finish_reason"), "end_turn"),
         "usage": {
             "input_tokens": usage.get("prompt_tokens"),
             "output_tokens": usage.get("completion_tokens"),
@@ -659,10 +731,12 @@ def extract_trial_data_openai(
 )
 @click.option(
     "--max-workers",
-    type=int,
+    "--workers",
+    "max_workers",
+    type=click.IntRange(min=1),
     default=8,
     show_default=True,
-    help="openai mode: concurrent requests to the server.",
+    help="sync and openai modes: concurrent requests to the model.",
 )
 @click.option(
     "--poll-interval",
@@ -758,7 +832,9 @@ def main(
                     "Bedrock batch jobs require at least that many. "
                     "Using sync mode instead."
                 )
-                _batch_fallback_to_sync(s3_input_jsonl_path, output_jsonl_path, model_id)
+                _batch_fallback_to_sync(
+                    s3_input_jsonl_path, output_jsonl_path, model_id, max_workers
+                )
             else:
                 extract_trial_data_bedrock_batch(
                     job_name=job_name,
@@ -791,6 +867,7 @@ def main(
             s3_input_jsonl_path=s3_input_jsonl_path,
             output_jsonl_path=output_jsonl_path,
             model_id=model_id,
+            max_workers=max_workers,
         )
 
 

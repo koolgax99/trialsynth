@@ -152,6 +152,30 @@ def cli():
     show_default=True,
     help="Worker threads for the corpus text download.",
 )
+@click.option(
+    "--skip-missing",
+    is_flag=True,
+    default=False,
+    help=(
+        "Leave out records with no text instead of failing, and write their "
+        "IDs to <prefix>_missing_ids.txt in the output directory."
+    ),
+)
+@click.option(
+    "--thinking",
+    type=click.Choice(["adaptive", "disabled"]),
+    default=None,
+    help=(
+        "Thinking mode to request (Claude 4.6+ models such as Haiku 5.5). "
+        "Omit to leave it out of the request."
+    ),
+)
+@click.option(
+    "--effort",
+    type=click.Choice(["low", "medium", "high"]),
+    default=None,
+    help="Effort level to request. Omit to leave it out of the request.",
+)
 def prepare(
     corpus_name: str,
     ids: tuple[str, ...],
@@ -162,6 +186,9 @@ def prepare(
     s3_uri: str | None,
     max_records: int,
     max_workers: int,
+    skip_missing: bool,
+    thinking: str | None,
+    effort: str | None,
 ) -> None:
     """Download texts and write Bedrock batch input JSONL.
 
@@ -185,6 +212,20 @@ def prepare(
 
     texts = corpus.load_texts(resolved, max_workers=max_workers)
 
+    if skip_missing:
+        missing = [rid for rid in resolved if not texts.get(str(rid))]
+        if missing:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            missing_path = out_dir / f"{prefix}_missing_ids.txt"
+            missing_path.write_text("\n".join(missing) + "\n", encoding="utf-8")
+            click.echo(
+                f"Skipping {len(missing)} {corpus.name} record(s) with no "
+                f"text; IDs written to {missing_path}"
+            )
+            resolved = [rid for rid in resolved if texts.get(str(rid))]
+        if not resolved:
+            raise click.ClickException(f"No {corpus.name} records have text")
+
     try:
         written = build_batch_input(
             resolved,
@@ -193,6 +234,8 @@ def prepare(
             texts=texts,
             prefix=prefix,
             max_records=max_records,
+            thinking=thinking,
+            effort=effort,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
