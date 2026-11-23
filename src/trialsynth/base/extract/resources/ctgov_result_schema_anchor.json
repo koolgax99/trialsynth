@@ -137,7 +137,7 @@
         "properties": {
           "group_label": {
             "type": "string",
-            "description": "The group's title, copied verbatim from the start of its line in 'Results groups'. Used to join back to the registry's own group records, so it must match exactly."
+            "description": "The group's title, copied verbatim from the start of its line in 'Results groups', up to ' — '. Used to join back to the registry's own group records, so it must match exactly."
           },
           "drug": {
             "type": [

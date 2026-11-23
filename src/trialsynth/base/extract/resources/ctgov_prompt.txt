@@ -24,8 +24,11 @@ evidence. Use the field 'evidence_anchor'. Do NOT copy the full line, just a uni
 from it. This anchor is used programmatically to locate the full line, so it must be verbatim.
 2. Split the 'Eligibility criteria' block into inclusion_criteria and exclusion_criteria. Classify
 each criterion by its meaning, not by the heading it appears under: registry records mislabel
-criteria, place exclusions under an inclusion heading, and phrase exclusions as inclusions
-("no history of X"). A criterion phrased as a requirement to be free of something is an exclusion.
+criteria and place exclusions under an inclusion heading. Test each criterion: would a patient
+who has condition X be turned away? If yes, it is an exclusion, written as the condition itself
+with the negation dropped ("No distant metastasis" becomes the exclusion "Distant metastasis").
+A negated line that describes the patient's situation, not a condition they must be free of,
+stays an inclusion (e.g. "No standard curative therapy exists", "No Pap smear in the past 3 years").
 3. Write each criterion as a short standalone clause that reads correctly on its own. A single
 registry line stating several independent requirements becomes several entries. Do NOT merge
 distinct requirements into one entry, and do NOT copy the heading text as a criterion.
@@ -44,8 +47,9 @@ justify biomarkers not listed in genetic.markers. Do NOT infer, expand, or subst
   "DNA repair" does NOT imply MLH1, MSH2, MSH6, PMS2 unless each gene is explicitly named).
 - Do NOT add genes based on pathway membership, drug mechanism, disease biology, or clinical
   knowledge (e.g. p16-positive does NOT justify adding TP53).
-- Do NOT add genes implied by therapy alone (e.g. anti-CD20 rituximab does NOT require MS4A1
-  unless CD20/MS4A1 is stated in the record).
+- Do NOT add a gene named only to describe a therapy, prior, planned or excluded (e.g. "prior
+  CD20- or CD19-targeted therapy" adds neither MS4A1 nor CD19). Add it only when the record tests,
+  measures or selects patients on it (e.g. "CD20-positive lymphoma").
 For each genetic.markers item:
 - evidence_anchor MUST be a verbatim phrase from a line that explicitly names this biomarker
 - text MUST be the HGNC normalization of that same explicitly named entity only
@@ -71,11 +75,14 @@ the description or a criterion, and do NOT merge or split the rendered arms.
 When the record has no 'Results groups' block, return [] for as_run_arms and null for
 randomization and recruitment.
 9. as_run_arms: one entry per line of the 'Results groups' block, and nothing else.
-- group_label is the title at the start of the line, copied verbatim and in full, up to the first
-  colon. It is the join key back to the registry's own records, so do not shorten or retitle it.
+- group_label is the text between '- ' and ' — ' on its line (when there is no ' — ', the whole
+  line without its closing full stop), copied verbatim and in full, colons included. It is the join key back to the registry's
+  own records, so do not shorten or retitle it.
 - drug, dose, route and schedule come from that group's own line only. Never carry a value over
   from another group's line, and use null for anything the line does not state.
-- A 'Total' or 'Overall' group is a reporting aggregate, not a treatment group: skip it.
+- Skip a group that pools other groups instead of receiving its own treatment ('Total', 'Overall',
+  'All Randomized Participants', 'Part A Overall Arm'). Keep every other line, even a generic
+  title ('Non-Randomized', 'Cohort 1').
 10. randomization: the allocation ratio and stratification factors, only when the prose states
 them. A record describing no assignment procedure gets nulls and an empty factor list, not an
 invented ratio.
