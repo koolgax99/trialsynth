@@ -1,5 +1,6 @@
 """Gets Clinicaltrials.gov data from REST API or saved file"""
 import datetime
+from collections.abc import Iterator, Sequence
 from time import sleep
 from typing import Optional
 
@@ -112,6 +113,39 @@ class CTFetcher(Fetcher):
             generate_pubmed_trial_links(
                 download_missing=True, max_files=max_pages
             )
+
+    def iter_trials_by_id(
+        self, nct_ids: Sequence[str], batch_size: int = 200
+    ) -> Iterator[Trial]:
+        """Fetch only the given trials from the API, one batch at a time.
+
+        Parameters
+        ----------
+        nct_ids :
+            NCT IDs to fetch. IDs the registry does not know are skipped.
+        batch_size :
+            IDs per request. The ID list goes in the URL, and the API rejects
+            URLs much past 200 IDs with 414.
+
+        Yields
+        ------
+        :
+            Each fetched trial.
+        """
+        try:
+            for start in range(0, len(nct_ids), batch_size):
+                self.raw_data = []
+                self.api_parameters.pop("pageToken", None)
+                self.api_parameters["filter.ids"] = ",".join(
+                    nct_ids[start:start + batch_size]
+                )
+                # pageSize is 1000, so a batch always fits on one page
+                self._read_next_page()
+                yield from self.raw_data
+        finally:
+            self.raw_data = []
+            self.api_parameters.pop("filter.ids", None)
+            self.api_parameters.pop("pageToken", None)
 
     def _read_next_page(self, retries: int = 3) -> None:
 

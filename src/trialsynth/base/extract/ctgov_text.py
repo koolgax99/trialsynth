@@ -45,7 +45,13 @@ def trials_by_nct() -> dict[str, Trial]:
             f"pipeline before preparing the ctgov corpus."
         )
     logger.info("Loading trial dump from %s", path)
-    with gzip.open(path, "rb") as fh:
+
+    with tqdm.wrapattr(
+        open(path, "rb"),
+        "read",
+        total=path.stat().st_size,
+        desc="Loading trial dump",
+    ) as raw, gzip.GzipFile(fileobj=raw) as fh:
         return {trial.ns_id: trial for trial in pickle.load(fh)}
 
 
@@ -106,20 +112,28 @@ def _results_lines(results) -> list[str]:
     events = results.adverse_events
     lines: list[str] = []
 
-    # Keyed by title: each module gives the same group its own ID (FG000, BG000...).
+    # Participant flow lists the groups actually enrolled; outcome groups can
+    # be time points or measure names, so they only lend descriptions.
+    primary = (
+        (flow.groups if flow else [])
+        or [g for g in (baseline.groups if baseline else []) if g.title != "Total"]
+        or (events.event_groups if events else [])
+    )
     roster: dict[str, str] = {}
+    for group in primary:
+        if group.title and group.title not in roster:
+            roster[group.title] = group.description or ""
     for group in (
-        *(flow.groups if flow else []),
         *(baseline.groups if baseline else []),
         *(events.event_groups if events else []),
         *(g for o in results.outcome_results for g in o.groups),
     ):
-        if group.title and group.title not in roster:
+        if group.title in roster and not roster[group.title]:
             roster[group.title] = group.description or ""
     if roster:
         lines.append("Results groups:")
         lines += [
-            f"- {title}: {_prose(desc)}" if desc else f"- {title}"
+            f"- {title} — {_prose(desc)}" if desc else f"- {title}"
             for title, desc in roster.items()
         ]
 
@@ -228,30 +242,33 @@ def load_texts(nct_ids: Sequence[str], max_workers: int = 8) -> dict[str, str]:
     nct_ids :
         NCT IDs to render.
     max_workers :
-        Ignored; rendering reads the local dump. Kept for corpus parity.
+        Ignored; batches are fetched one at a time. Kept for corpus parity.
 
     Returns
     -------
     :
-        Rendered text per NCT ID. IDs missing from the trial dump, and records
-        with no renderable field, are left out.
+        Rendered text per NCT ID. IDs the registry does not return, and
+        records with no renderable field, are left out.
     """
-    trials = trials_by_nct()
+    from trialsynth.ctgov.config import CTConfig
+    from trialsynth.ctgov.fetch import CTFetcher
+
     texts = {}
-    missing = []
-    for nct_id in tqdm(nct_ids, desc="Rendering registry records"):
-        trial = trials.get(nct_id)
-        text = render_trial(trial) if trial else ""
-        if not text:
-            missing.append(nct_id)
-            continue
-        texts[nct_id] = text
+    fetcher = CTFetcher(CTConfig())
+    for trial in tqdm(
+        fetcher.iter_trials_by_id(list(nct_ids)),
+        total=len(nct_ids),
+        desc="Fetching registry records",
+    ):
+        text = render_trial(trial)
+        if text:
+            texts[trial.ns_id] = text
 
     logger.info("Rendered %d registry records", len(texts))
+    missing = [nct_id for nct_id in nct_ids if nct_id not in texts]
     if missing:
         logger.warning(
-            "%d NCT ID(s) are not in the trial dump, or render empty (%s...). "
-            "Re-run the clinicaltrials fetch to widen coverage.",
+            "%d NCT ID(s) are not in the registry, or render empty (%s...).",
             len(missing),
             ", ".join(missing[:10]),
         )
